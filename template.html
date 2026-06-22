@@ -298,6 +298,8 @@ function colorKey(r){return`${r.style_no}|${r.color_code}`;}
 function defaultSort(a,b){
   const br=brandRank(a.brand)-brandRank(b.brand); if(br) return br;
   const sn=String(a.style_no||'').localeCompare(String(b.style_no||''),'zh-TW'); if(sn) return sn;
+  const od=String(a.order_date_raw||'').localeCompare(String(b.order_date_raw||'')); if(od) return od;
+  const oi=String(a.order_id||'').localeCompare(String(b.order_id||'')); if(oi) return oi;
   const cn=String(a.color_name||'').localeCompare(String(b.color_name||''),'zh-TW'); if(cn) return cn;
   return sizeRank(a.size)-sizeRank(b.size);
 }
@@ -740,7 +742,7 @@ function renderStore(){
     const qty=g.items.reduce((s,r)=>s+(r.alloc_qty||0),0);
     const sorted=[...g.items].sort((a,b)=>defaultSort(a,b));
     const rows=sorted.map(r=>`<tr>
-      <td>${r.order_id}</td><td>${r.brand}</td>
+      <td>${r.order_id}</td><td>${r.brand}</td><td>${r.style_no}</td>
       <td style="font-size:11px">${r.name}${r.is_special?'<span class="tag-sp">★</span>':''}${r.is_preorder?'<span class="tag-pre">預購</span>':''}</td>
       <td>${r.size}</td><td>${r.color_name}</td>
       <td>${r.alloc_qty||0}</td><td class="date-c">${r.eta}</td>
@@ -753,7 +755,7 @@ function renderStore(){
       </div>
       <div class="sg-body">
         <table class="dtable" style="min-width:500px">
-          <thead><tr><th>小白單編號</th><th>品牌</th><th>商品名稱</th><th>尺寸</th><th>顏色</th><th>配貨量</th><th>預計到貨日</th></tr></thead>
+          <thead><tr><th>小白單編號</th><th>品牌</th><th>款號</th><th>商品名稱</th><th>尺寸</th><th>顏色</th><th>配貨量</th><th>預計到貨日</th></tr></thead>
           <tbody>${rows}</tbody>
         </table>
       </div></div>`;
