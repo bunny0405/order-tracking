@@ -8,9 +8,44 @@
   門市基本資料.xlsx / 預購清單_2026.xlsx（可選）
   generate.py / template.html → index.html
 """
-import glob, json, os, re
+import glob, io, json, os, re, struct, sys, zlib, zipfile
 from datetime import datetime, timedelta
 import pandas as pd
+
+def read_xlsx(path, sheet_name=0, header=0):
+    """Read xlsx that may be missing its ZIP central directory."""
+    try:
+        return pd.read_excel(path, sheet_name=sheet_name, header=header)
+    except Exception:
+        pass
+    with open(path, 'rb') as f:
+        data = f.read()
+    positions = [m.start() for m in re.finditer(b'PK\x03\x04', data)]
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
+        for i, pos in enumerate(positions):
+            fname_len = struct.unpack_from('<H', data, pos+26)[0]
+            extra_len = struct.unpack_from('<H', data, pos+28)[0]
+            fname = data[pos+30:pos+30+fname_len].decode('utf-8', errors='replace')
+            data_start = pos + 30 + fname_len + extra_len
+            data_end = positions[i+1] if i+1 < len(positions) else len(data)
+            if data_end <= data_start:
+                continue
+            compressed = data[data_start:data_end]
+            dec = zlib.decompressobj(-15)
+            try:
+                raw = dec.decompress(compressed) + dec.flush()
+            except zlib.error:
+                raw = zlib.decompressobj(-15).decompress(compressed)
+            if not raw:
+                continue
+            if 'sheet' in fname and fname.endswith('.xml') and not raw.rstrip().endswith(b'</worksheet>'):
+                last_row = raw.rfind(b'</row>')
+                if last_row > 0:
+                    raw = raw[:last_row+6] + b'</sheetData></worksheet>'
+            zout.writestr(fname, raw)
+    buf.seek(0)
+    return pd.read_excel(buf, sheet_name=sheet_name, header=header)
 
 BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_HTML   = os.path.join(BASE_DIR, 'index.html')
@@ -60,11 +95,11 @@ for label, f in [('追加單',file_reorder),('採購總表',file_purchase),('調
     print(f"  {label}：{os.path.basename(f) if f and f!='（無）' else '（無）'}")
 
 print("\n📊 讀取資料…")
-df_r = pd.read_excel(file_reorder)
-df_p = pd.read_excel(file_purchase)
-df_t = pd.read_excel(file_transfer)
-df_s_raw = pd.read_excel(file_store, sheet_name='店數', header=None)
-df_pre = pd.read_excel(file_preorder) if file_preorder else None
+df_r = read_xlsx(file_reorder)
+df_p = read_xlsx(file_purchase)
+df_t = read_xlsx(file_transfer)
+df_s_raw = read_xlsx(file_store, sheet_name='店數', header=None)
+df_pre = read_xlsx(file_preorder) if file_preorder else None
 print(f"  追加單 {len(df_r)} / 採購總表 {len(df_p)} / 調撥單 {len(df_t)}")
 
 # ── 預購款號 ──
