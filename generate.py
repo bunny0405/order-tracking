@@ -10,7 +10,7 @@
   generate.py / template.html → index.html
 """
 import glob, json, os, re, sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import pandas as pd
 
 # Windows cmd encoding fix
@@ -57,6 +57,9 @@ def require_cols(df, cols, label):
     miss = [c for c in cols if c not in df.columns]
     if miss:
         raise ValueError(f"{label} 缺少欄位：{miss}\n  目前欄位：{list(df.columns)[:40]}")
+
+def now_tw():
+    return datetime.now(timezone(timedelta(hours=8))).replace(tzinfo=None)
 
 def parse_date(v):
     if not v: return None
@@ -181,7 +184,7 @@ for _, row in df_t.iterrows():
 
 # ── 主處理 ──
 print("[4]  資料串接中…")
-today = datetime.now().replace(hour=0,minute=0,second=0,microsecond=0)
+today = now_tw().replace(hour=0,minute=0,second=0,microsecond=0)
 result = []
 has_preorder_col = '預購款' in df_r.columns
 
@@ -330,7 +333,7 @@ with open(TEMPLATE_FILE,'r',encoding='utf-8') as f: template = f.read()
 
 payload = json.dumps({
     'data':          result,
-    'generated':     datetime.now().strftime('%Y/%m/%d %H:%M'),
+    'generated':     now_tw().strftime('%Y/%m/%d %H:%M'),
     'counts':        counts,
     'alert_count':   alert_count,
     'preorder_count':preorder_count,
