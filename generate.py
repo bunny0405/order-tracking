@@ -3,49 +3,20 @@
 使用方式：python generate.py
 輸出：index.html
 
-資料夾結構（與此腳本同目錄）：
-  追加單_2026.xlsx / 採購總表_2026.xlsx / 調撥單_2026.xlsx
-  門市基本資料.xlsx / 預購清單_2026.xlsx（可選）
+資料來源（雲端版）：
+  由 config.json 指定 Google Drive 電腦版同步出來的資料夾（data_dir）
+  及門市資料表.xlsx 位置（store_file，分頁 門市資料表_底檔）。
+  若沒有 config.json，則退回讀取與腳本同目錄的檔案（舊做法）。
   generate.py / template.html → index.html
 """
-import glob, io, json, os, re, struct, sys, zlib, zipfile
+import glob, json, os, re, sys
 from datetime import datetime, timedelta
 import pandas as pd
 
-def read_xlsx(path, sheet_name=0, header=0):
-    """Read xlsx that may be missing its ZIP central directory."""
-    try:
-        return pd.read_excel(path, sheet_name=sheet_name, header=header)
-    except Exception:
-        pass
-    with open(path, 'rb') as f:
-        data = f.read()
-    positions = [m.start() for m in re.finditer(b'PK\x03\x04', data)]
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, 'w', zipfile.ZIP_DEFLATED) as zout:
-        for i, pos in enumerate(positions):
-            fname_len = struct.unpack_from('<H', data, pos+26)[0]
-            extra_len = struct.unpack_from('<H', data, pos+28)[0]
-            fname = data[pos+30:pos+30+fname_len].decode('utf-8', errors='replace')
-            data_start = pos + 30 + fname_len + extra_len
-            data_end = positions[i+1] if i+1 < len(positions) else len(data)
-            if data_end <= data_start:
-                continue
-            compressed = data[data_start:data_end]
-            dec = zlib.decompressobj(-15)
-            try:
-                raw = dec.decompress(compressed) + dec.flush()
-            except zlib.error:
-                raw = zlib.decompressobj(-15).decompress(compressed)
-            if not raw:
-                continue
-            if 'sheet' in fname and fname.endswith('.xml') and not raw.rstrip().endswith(b'</worksheet>'):
-                last_row = raw.rfind(b'</row>')
-                if last_row > 0:
-                    raw = raw[:last_row+6] + b'</sheetData></worksheet>'
-            zout.writestr(fname, raw)
-    buf.seek(0)
-    return pd.read_excel(buf, sheet_name=sheet_name, header=header)
+# Windows cmd encoding fix
+import io
+sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='replace')
+sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
 OUTPUT_HTML   = os.path.join(BASE_DIR, 'index.html')
@@ -61,12 +32,31 @@ SPECIAL_CATS  = {'泳裝','鞋子','內搭小可愛','內睡衣褲'}
 BRAND_ORDER   = ['AS','OL','CA','PLUS','IP','泳裝','鞋子']
 SIZE_ORDER    = ['XS','S','S+','M','M+','L','L+','XL','2XL','2L','3XL','3L','F','FF','ONE SIZE']
 
-def find_file(pattern, required=True):
-    matches = sorted(glob.glob(os.path.join(BASE_DIR, pattern)), reverse=True)
+CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
+CONFIG = {}
+if os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, 'r', encoding='utf-8-sig') as f: CONFIG = json.load(f)
+DATA_DIR    = CONFIG.get('data_dir') or BASE_DIR
+STORE_FILE  = CONFIG.get('store_file') or ''
+STORE_SHEET = CONFIG.get('store_sheet') or '門市資料表_底檔'
+
+def find_file(patterns, required=True, folder=None):
+    folder = folder or DATA_DIR
+    if isinstance(patterns, str): patterns = [patterns]
+    matches = []
+    for p in patterns:
+        for m in glob.glob(os.path.join(folder, p)):
+            if os.path.basename(m).startswith('~$'): continue   # Excel 暫存檔
+            matches.append(m)
     if not matches:
-        if required: raise FileNotFoundError(f"找不到 {pattern}，請確認資料夾：{BASE_DIR}")
+        if required: raise FileNotFoundError(f"找不到 {' / '.join(patterns)}，請確認資料夾：{folder}")
         return None
-    return matches[0]
+    return sorted(matches, key=lambda m: (os.path.getmtime(m), m), reverse=True)[0]
+
+def require_cols(df, cols, label):
+    miss = [c for c in cols if c not in df.columns]
+    if miss:
+        raise ValueError(f"{label} 缺少欄位：{miss}\n  目前欄位：{list(df.columns)[:40]}")
 
 def parse_date(v):
     if not v: return None
@@ -83,34 +73,61 @@ def size_rank(s):
     try: return SIZE_ORDER.index(str(s).strip())
     except: return 99
 
-print("📂 尋找資料檔案…")
+print("[1] 尋找資料檔案…")
+print(f"  資料夾：{DATA_DIR}")
 file_reorder  = find_file('追加單_*.xlsx')
 file_purchase = find_file('採購總表_*.xlsx')
-file_transfer = find_file('調撥單_*.xlsx')
-file_store    = find_file('門市基本資料*.xlsx')
+file_transfer = find_file(['調撥出庫明細表_*.xlsx','調撥單_*.xlsx'])
+if STORE_FILE:
+    if not os.path.exists(STORE_FILE): raise FileNotFoundError(f"找不到門市資料表：{STORE_FILE}")
+    file_store = STORE_FILE
+else:
+    file_store = find_file(['門市資料表*.xlsx','門市基本資料*.xlsx'])
 file_preorder = find_file('預購清單_*.xlsx', required=False)
 
 for label, f in [('追加單',file_reorder),('採購總表',file_purchase),('調撥單',file_transfer),
                   ('門市資料',file_store),('預購清單',file_preorder or '（無）')]:
     print(f"  {label}：{os.path.basename(f) if f and f!='（無）' else '（無）'}")
 
-print("\n📊 讀取資料…")
-df_r = read_xlsx(file_reorder)
-df_p = read_xlsx(file_purchase)
-df_t = read_xlsx(file_transfer)
-df_s_raw = read_xlsx(file_store, sheet_name='店數', header=None)
-df_pre = read_xlsx(file_preorder) if file_preorder else None
+print("\n[2] 讀取資料…")
+df_r = pd.read_excel(file_reorder)
+df_p = pd.read_excel(file_purchase)
+df_t = pd.read_excel(file_transfer)
+xl_s = pd.ExcelFile(file_store)
+if STORE_SHEET in xl_s.sheet_names:
+    df_s_raw = xl_s.parse(STORE_SHEET, header=None)      # 雲端 門市資料表_底檔
+elif '店數' in xl_s.sheet_names:
+    df_s_raw = xl_s.parse('店數', header=None)           # 舊版 門市基本資料
+else:
+    raise ValueError(f"門市檔找不到分頁 {STORE_SHEET}，現有分頁：{xl_s.sheet_names}")
+require_cols(df_r, ['小白單編號','TW_A(門市)頭單','商品條碼','商品大分類','採購類別','單據日期'], '追加單')
+require_cols(df_p, ['通路','預購單號','商品條碼','採購日期','數量','已驗收數量'], '採購總表')
+require_cols(df_t, ['商品條碼','調出日期','調入倉庫','倉庫名稱.1','調出數量','調入數量'], '調撥明細')
+df_pre = pd.read_excel(file_preorder) if file_preorder else None
 print(f"  追加單 {len(df_r)} / 採購總表 {len(df_p)} / 調撥單 {len(df_t)}")
 
 # ── 預購款號 ──
-preorder_styles = set()
+# -- 預購小白單編號 --
+preorder_orders = set()
 if df_pre is not None:
-    preorder_styles = set(df_pre['款號'].dropna().astype(str).str.strip())
+    if '小白單編號' in df_pre.columns:
+        preorder_orders = set(df_pre['小白單編號'].dropna().astype(str).str.strip())
+        print(f"  預購小白單編號：{len(preorder_orders)} 個")
+    elif '款號' in df_pre.columns:
+        preorder_orders = set(df_pre['款號'].dropna().astype(str).str.strip())
+        print(f"  預購款號（fallback）：{len(preorder_orders)} 個")
 
 # ── 門市對照 + 轄區負責人 ──
-hdr = df_s_raw.iloc[0].tolist()
-df_s = df_s_raw.iloc[1:].copy(); df_s.columns = hdr
-df_s = df_s[df_s['倉庫編號'].notna() & (df_s['區域'] != '已歇業')]
+# 表頭可能不在第一列；重複欄名（轄區負責人 ×2）只保留第一個（暱稱）
+_hrow = next((i for i in range(min(10,len(df_s_raw))) if '倉庫編號' in df_s_raw.iloc[i].astype(str).tolist()), 0)
+_seen, hdr = set(), []
+for h in df_s_raw.iloc[_hrow].tolist():
+    h = str(h).strip()
+    hdr.append(h if h not in _seen else h + '_dup'); _seen.add(h)
+df_s = df_s_raw.iloc[_hrow+1:].copy(); df_s.columns = hdr
+require_cols(df_s, ['倉庫編號','倉庫名稱','轄區','轄區負責人','販售店','區域'], '門市資料表')
+df_s = df_s[df_s['倉庫編號'].notna() & (df_s['區域'].astype(str).str.strip() != '已歇業')]
+df_s = df_s[~df_s['倉庫編號'].astype(str).str.contains('已關店')]
 store_map = {}
 for _, row in df_s.iterrows():
     code = str(row['倉庫編號']).strip()
@@ -129,7 +146,7 @@ mgr_counts = Counter(v['manager'] for v in store_map.values())
 MGR_ORDER = [m for m,_ in mgr_counts.most_common()]
 
 # ── 採購索引 ──
-print("🔗 建立採購索引…")
+print("[3] 建立採購索引…")
 pu_idx = {}
 for _, row in df_p[df_p['通路']=='門市'].iterrows():
     rid = str(row['預購單號']).strip() if pd.notna(row['預購單號']) else ''
@@ -146,7 +163,7 @@ for _, row in df_p[df_p['通路']=='門市'].iterrows():
     rec['received'] += int(row['已驗收數量']) if pd.notna(row['已驗收數量']) else 0
 
 # ── 調撥索引 ──
-print("🔗 建立調撥索引…")
+print("[3] 建立調撥索引…")
 tr_idx = {}
 for _, row in df_t.iterrows():
     bc = str(row['商品條碼']).strip() if pd.notna(row['商品條碼']) else ''
@@ -163,8 +180,8 @@ for _, row in df_t.iterrows():
     })
 
 # ── 主處理 ──
-print("⚙️  資料串接中…")
-today = (datetime.utcnow() + __import__('datetime').timedelta(hours=8)).replace(hour=0,minute=0,second=0,microsecond=0)
+print("[4]  資料串接中…")
+today = datetime.now().replace(hour=0,minute=0,second=0,microsecond=0)
 result = []
 has_preorder_col = '預購款' in df_r.columns
 
@@ -190,7 +207,7 @@ for _, row in df_r.iterrows():
         pv = row['預購款']
         is_preorder = pd.notna(pv) and str(pv).strip() not in ('','nan')
     else:
-        is_preorder = style_no in preorder_styles
+        is_preorder = order_id in preorder_orders
 
     odate_raw      = row['單據日期']
     order_date_str = re.sub(r'\D','',str(odate_raw))[:8] if pd.notna(odate_raw) else ''
@@ -278,6 +295,27 @@ for _, row in df_r.iterrows():
         'overdue_days':  overdue_days,
     })
 
+# 預先排序：品牌→款號→顏色名稱→尺寸
+BRAND_ORDER_PY = ['AS','OL','CA','PLUS','IP','泳裝','鞋子','內搭小可愛','內睡衣褲']
+SIZE_ORDER_PY  = ['XS','S','S+','M','M+','L','L+','XL','2XL','2L','3XL','3L','F','FF','ONE SIZE']
+
+def brand_rank_py(b):
+    try: return BRAND_ORDER_PY.index(b)
+    except: return 99
+
+def size_rank_py(s):
+    try: return SIZE_ORDER_PY.index(str(s).strip())
+    except: return 99
+
+result.sort(key=lambda r: (
+    brand_rank_py(r['brand']),
+    str(r['style_no']),
+    str(r['order_date_raw']),   # 同款號依下單日排（早的先）
+    str(r['order_id']),          # 同下單日依小白單編號排
+    str(r['color_name']),
+    size_rank_py(r['size'])
+))
+
 counts = {}
 for r in result: counts[r['status']] = counts.get(r['status'],0)+1
 alert_count    = sum(1 for r in result if r['is_alert'])
@@ -287,12 +325,12 @@ print(f"  串接完成：{len(result)} 筆  警示：{alert_count}  預購：{pr
 print(f"  狀態：{counts}")
 
 # 產出 HTML
-print("\n📝 產出 HTML…")
+print("\n[5] 產出 HTML…")
 with open(TEMPLATE_FILE,'r',encoding='utf-8') as f: template = f.read()
 
 payload = json.dumps({
     'data':          result,
-    'generated':     (datetime.utcnow() + __import__('datetime').timedelta(hours=8)).strftime('%Y/%m/%d %H:%M'),
+    'generated':     datetime.now().strftime('%Y/%m/%d %H:%M'),
     'counts':        counts,
     'alert_count':   alert_count,
     'preorder_count':preorder_count,
@@ -302,4 +340,4 @@ payload = json.dumps({
 
 with open(OUTPUT_HTML,'w',encoding='utf-8') as f:
     f.write(template.replace('/*__DATA_PLACEHOLDER__*/null', payload))
-print(f"✅ 完成！總筆數：{len(result)} / 警示：{alert_count} / 預購：{preorder_count}")
+print(f"[OK] 完成！總筆數：{len(result)} / 警示：{alert_count} / 預購：{preorder_count}")
