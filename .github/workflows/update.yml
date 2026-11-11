@@ -1,0 +1,28 @@
+name: update-dashboard
+on:
+  schedule:
+        - cron: '0 2 * * 3,5'      # 週三、週五 10:00（台北）
+  workflow_dispatch:           # 可在 GitHub 網頁手動執行
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.12' }
+      - run: pip install pandas openpyxl
+      - name: 下載雲端資料
+        env:
+          APPS_SCRIPT_URL: ${{ secrets.APPS_SCRIPT_URL }}
+          APPS_SCRIPT_TOKEN: ${{ secrets.APPS_SCRIPT_TOKEN }}
+        run: python fetch_data.py
+      - name: 產出 index.html
+        run: python -X utf8 generate.py
+      - name: 推送
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@users.noreply.github.com"
+          git add index.html
+          git diff --cached --quiet || (git commit -m "auto update $(TZ=Asia/Taipei date +%Y%m%d_%H%M)" && git push)
